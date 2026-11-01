@@ -212,8 +212,11 @@ fn training_step_matches_cpu() {
     let gpu_model = gpu_model.to(GPU);
     let x = Tensor::randn(&[8, 1, 8, 8]);
     let y = Tensor::randint(0, 10, &[8]);
-    let mut o1 = optim::Adam::new(cpu.parameters(), 1e-2);
-    let mut o2 = optim::Adam::new(gpu_model.parameters(), 1e-2);
+    // SGD, not Adam: the conv bias feeds BatchNorm, so its true gradient is
+    // ~0 and what's left is rounding noise, which Adam's 1/√v would amplify
+    // into full-size steps of either sign.
+    let mut o1 = optim::SGD::new(cpu.parameters(), 0.1).momentum(0.9);
+    let mut o2 = optim::SGD::new(gpu_model.parameters(), 0.1).momentum(0.9);
     for _ in 0..3 {
         let l1 = F::cross_entropy(&cpu.forward(&x), &y);
         o1.zero_grad();
@@ -224,6 +227,9 @@ fn training_step_matches_cpu() {
         l2.backward();
         o2.step();
         assert!((l1.item() - l2.item()).abs() < 1e-4, "loss {} vs {}", l1.item(), l2.item());
+        for (p, q) in cpu.parameters().iter().zip(gpu_model.parameters()) {
+            same("grad", p.grad().unwrap().data(), q.grad().unwrap().data(), 1e-3);
+        }
     }
     for ((n, a), (_, b)) in cpu.state_dict().iter().zip(gpu_model.state_dict().iter()) {
         same(n, a, b, 1e-3);
