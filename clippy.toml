@@ -1,0 +1,2 @@
+# is_multiple_of needs Rust 1.87; the MSRV is 1.82.
+msrv = "1.82"

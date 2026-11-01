@@ -102,7 +102,7 @@ impl StateDict {
         }
         let mut h = serde_json::to_vec(&serde_json::Value::Object(header)).expect("JSON");
         // Pad the header so tensor data starts 8-byte aligned.
-        while !h.len().is_multiple_of(8) {
+        while h.len() % 8 != 0 {
             h.push(b' ');
         }
         let mut out = Vec::with_capacity(8 + h.len() + data.len());

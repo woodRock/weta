@@ -193,7 +193,7 @@ pub fn resolve_shape(op: &'static str, numel: usize, shape: &[isize]) -> Result<
     }
     let mut out: Vec<usize> = shape.iter().map(|&d| d.max(0) as usize).collect();
     if let Some(i) = infer {
-        if known == 0 || !numel.is_multiple_of(known) {
+        if known == 0 || numel % known != 0 {
             return Err(Error::shape(op, format!("can't infer -1 in {shape:?} for {numel} elements")));
         }
         out[i] = numel / known;
