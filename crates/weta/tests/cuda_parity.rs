@@ -129,6 +129,42 @@ fn reductions() {
 }
 
 #[test]
+fn long_axis_block_reductions() {
+    if !gpu() {
+        return;
+    }
+    // Axes of 128+ use the block-per-output kernel, including strided ones.
+    for shape in [[3usize, 1000], [700, 5]] {
+        let x = rand(&shape, DType::F64);
+        let g = x.to(GPU);
+        for d in 0..2isize {
+            same("sum", &x.sum_dims(&[d], false), &g.sum_dims(&[d], false), 1e-10);
+            same("max", &x.max_dims(&[d], false), &g.max_dims(&[d], false), 0.0);
+            same("min", &x.min_dims(&[d], false), &g.min_dims(&[d], false), 0.0);
+        }
+    }
+    let x = rand(&[64, 32, 28, 28], DType::F32).permute(&[1, 0, 2, 3]);
+    same("batch-norm style mean", &x.mean_dims(&[1, 2, 3], false), &x.to(GPU).mean_dims(&[1, 2, 3], false), 1e-4);
+}
+
+#[test]
+fn random_numbers_match_the_cpu_for_the_same_seed() {
+    if !gpu() {
+        return;
+    }
+    use weta::raw::Distribution;
+    // Explicit seeds: tests run in parallel and share the global generator.
+    for dt in [DType::F32, DType::F64] {
+        for (dist, shape) in
+            [(Distribution::Normal { mean: 0.0, std: 1.0 }, [10, 100]), (Distribution::Uniform { lo: -2.0, hi: 5.0 }, [3, 7])]
+        {
+            let cpu = Raw::random_seeded(&shape, dist, dt, Device::Cpu, 9);
+            same(&format!("{dist:?}"), &cpu, &Raw::random_seeded(&shape, dist, dt, GPU, 9), 1e-6);
+        }
+    }
+}
+
+#[test]
 fn matmul_layouts() {
     if !gpu() {
         return;

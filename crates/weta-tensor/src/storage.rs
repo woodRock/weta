@@ -5,7 +5,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use weta_core::{Backend, BinaryOp, DType, Device, HostData, Im2ColParams, Layout, ReduceOp, Result, UnaryOp, View};
+use weta_core::{Backend, BinaryOp, DType, Device, Distribution, HostData, Im2ColParams, Layout, ReduceOp, Result, UnaryOp, View};
 use weta_cpu::{CpuBackend, CpuStorage};
 
 pub enum Storage {
@@ -134,6 +134,16 @@ impl Storage {
             Device::Cpu => Ok(Storage::Cpu(CpuBackend.zeros(len, dtype))),
             #[cfg(feature = "cuda")]
             Device::Cuda(i) => Ok(Storage::Cuda(weta_cuda::backend(i)?.zeros(len, dtype))),
+            #[cfg(not(feature = "cuda"))]
+            Device::Cuda(_) => Err(weta_core::Error::DeviceUnavailable("weta was built without the `cuda` feature".into())),
+        }
+    }
+
+    pub fn random(len: usize, dtype: DType, device: Device, dist: Distribution, seed: u64) -> Result<Storage> {
+        match device {
+            Device::Cpu => Ok(Storage::Cpu(CpuBackend.random(len, dtype, dist, seed))),
+            #[cfg(feature = "cuda")]
+            Device::Cuda(i) => Ok(Storage::Cuda(weta_cuda::backend(i)?.random(len, dtype, dist, seed))),
             #[cfg(not(feature = "cuda"))]
             Device::Cuda(_) => Err(weta_core::Error::DeviceUnavailable("weta was built without the `cuda` feature".into())),
         }

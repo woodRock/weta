@@ -199,3 +199,15 @@ fn indexing_matches_pytorch() {
     assert_eq!(x.i((.., 1..3, 3)).to_vec::<f32>(), vec![7., 11., 19., 23.]);
     assert_eq!(x.i(1).shape(), &[3, 4]);
 }
+
+#[test]
+fn clip_grad_norm_handles_shared_gradients() {
+    // a + b gives both leaves the same gradient tensor.
+    let a = Tensor::ones(&[4]).requires_grad_(true);
+    let b = Tensor::ones(&[4]).requires_grad_(true);
+    (&a + &b).sum().backward();
+    let norm = nn::utils::clip_grad_norm_(&[a.clone(), b.clone()], 1.0);
+    assert!((norm - 8f64.sqrt()).abs() < 1e-6);
+    let after: f64 = [&a, &b].iter().map(|p| (p.grad().unwrap().square()).sum().item()).sum::<f64>().sqrt();
+    assert!((after - 1.0).abs() < 1e-4, "norm after clipping {after}");
+}

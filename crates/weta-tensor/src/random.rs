@@ -1,12 +1,19 @@
 //! The global random number generator behind `rand`, `randn`, init schemes,
 //! dropout and shuffling. [`manual_seed`] makes runs reproducible, as
-//! `torch.manual_seed` does. Numbers are generated on the host and copied to
-//! the device, so every backend sees the same values for the same seed.
+//! `torch.manual_seed` does.
+//!
+//! Random *tensors* are made in two steps: the global generator draws one
+//! 64-bit seed, then the tensor's backend fills every element from the
+//! counter-based [`Distribution::sample`]. A GPU fills them in a kernel
+//! without a host copy, and every backend gives the same values for the
+//! same seed.
 
 use std::sync::Mutex;
 
-use weta_core::{DType, Device};
+use weta_core::{DType, Device, Distribution};
 
+use crate::storage::Storage;
+use crate::tensor::ok;
 use crate::Tensor;
 
 /// PCG-XSH-RR (O'Neill, 2014): 64-bit state, 32-bit output, small and fast,
@@ -32,6 +39,10 @@ impl Rng {
         let xorshifted = (((old >> 18) ^ old) >> 27) as u32;
         let rot = (old >> 59) as u32;
         xorshifted.rotate_right(rot)
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        ((self.next_u32() as u64) << 32) | self.next_u32() as u64
     }
 
     /// Uniform in `[0, 1)` with 53 random bits.
@@ -79,32 +90,43 @@ pub fn manual_seed(seed: u64) {
 }
 
 impl Tensor {
-    fn from_f64s(v: Vec<f64>, shape: &[usize], dtype: DType, device: Device) -> Tensor {
-        Tensor::from_vec(v, shape).to_dtype(dtype).to(device)
+    /// A tensor of independent draws from `dist`, made on `device`.
+    #[track_caller]
+    pub fn random(shape: &[usize], dist: Distribution, dtype: DType, device: Device) -> Tensor {
+        let seed = with_rng(|r| r.next_u64());
+        Tensor::random_seeded(shape, dist, dtype, device, seed)
+    }
+
+    /// As [`random`](Self::random), with an explicit seed instead of one from
+    /// the global generator: the same seed gives the same tensor on every
+    /// backend, whatever else the program (or another thread) has drawn.
+    #[track_caller]
+    pub fn random_seeded(shape: &[usize], dist: Distribution, dtype: DType, device: Device, seed: u64) -> Tensor {
+        let n = shape.iter().product();
+        // Integer tensors are drawn as f64 and rounded down.
+        let float = if dtype.is_float() { dtype } else { DType::F64 };
+        let t = Tensor::from_storage(ok(Storage::random(n, float, device, dist, seed)), shape, float, device);
+        t.to_dtype(dtype)
     }
 
     /// Uniform in `[0, 1)`.
     pub fn rand(shape: &[usize], dtype: DType, device: Device) -> Tensor {
-        let n = shape.iter().product();
-        let v = with_rng(|r| (0..n).map(|_| r.uniform()).collect());
-        Tensor::from_f64s(v, shape, dtype, device)
+        Tensor::uniform(shape, 0.0, 1.0, dtype, device)
     }
 
     /// Uniform in `[lo, hi)`.
     pub fn uniform(shape: &[usize], lo: f64, hi: f64, dtype: DType, device: Device) -> Tensor {
-        Tensor::rand(shape, dtype, device).affine(hi - lo, lo)
+        Tensor::random(shape, Distribution::Uniform { lo, hi }, dtype, device)
     }
 
     /// Standard normal.
     pub fn randn(shape: &[usize], dtype: DType, device: Device) -> Tensor {
-        let n = shape.iter().product();
-        let v = with_rng(|r| (0..n).map(|_| r.normal()).collect());
-        Tensor::from_f64s(v, shape, dtype, device)
+        Tensor::normal(shape, 0.0, 1.0, dtype, device)
     }
 
     /// Normal with the given mean and standard deviation.
     pub fn normal(shape: &[usize], mean: f64, std: f64, dtype: DType, device: Device) -> Tensor {
-        Tensor::randn(shape, dtype, device).affine(std, mean)
+        Tensor::random(shape, Distribution::Normal { mean, std }, dtype, device)
     }
 
     /// Integers uniform in `[low, high)`, as `I64`.
@@ -134,6 +156,18 @@ mod tests {
         manual_seed(1);
         let b = Tensor::randn(&[5], DType::F32, Device::Cpu).to_vec::<f32>();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn random_tensors_have_the_right_moments() {
+        // Explicit seeds: tests run in parallel and share the global generator.
+        let n = Tensor::random_seeded(&[40000], Distribution::Normal { mean: 2.0, std: 3.0 }, DType::F64, Device::Cpu, 5);
+        let mean = n.mean().item();
+        let std = n.var_dims(&[0], false, false).item().sqrt();
+        assert!((mean - 2.0).abs() < 0.05 && (std - 3.0).abs() < 0.05, "mean {mean} std {std}");
+        let u = Tensor::random_seeded(&[40000], Distribution::Uniform { lo: -1.0, hi: 1.0 }, DType::F32, Device::Cpu, 6).to_vec::<f32>();
+        assert!(u.iter().all(|v| (-1.0..1.0).contains(v)));
+        assert!((u.iter().sum::<f32>() / u.len() as f32).abs() < 0.02);
     }
 
     #[test]

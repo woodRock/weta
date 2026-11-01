@@ -38,12 +38,16 @@ pub mod utils {
     /// returns the norm before clipping (`clip_grad_norm_`).
     pub fn clip_grad_norm_(parameters: &[Tensor], max_norm: f64) -> f64 {
         let _g = no_grad();
-        let grads: Vec<Tensor> = parameters.iter().filter_map(|p| p.grad()).collect();
-        let total: f64 = grads.iter().map(|g| (g * g).sum().item()).sum::<f64>().sqrt();
+        let total: f64 = parameters.iter().filter_map(|p| p.grad()).map(|g| (&g * &g).sum().item()).sum::<f64>().sqrt();
         let scale = max_norm / (total + 1e-6);
         if scale < 1.0 {
-            for g in &grads {
-                g.data().mul_scalar_(scale);
+            // Replace rather than scale in place: gradients can share storage
+            // (both inputs of `a + b` get the same one), and an in-place
+            // scale would hit a shared gradient twice.
+            for p in parameters {
+                if let Some(g) = p.grad() {
+                    p.set_grad(Some(&g * scale));
+                }
             }
         }
         total

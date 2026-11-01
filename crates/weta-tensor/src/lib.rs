@@ -18,7 +18,7 @@ mod tensor;
 pub use random::{manual_seed, randperm, with_rng, Rng};
 pub use storage::{cuda_device_count, cuda_is_available, cuda_profile_report};
 pub use tensor::{allclose, FromHost, IntoHost, Tensor};
-pub use weta_core::{BinaryOp, DType, Device, Error, HostData, Im2ColParams, Layout, ReduceOp, Result, UnaryOp};
+pub use weta_core::{BinaryOp, DType, Device, Distribution, Error, HostData, Im2ColParams, Layout, ReduceOp, Result, UnaryOp};
 
 #[cfg(test)]
 mod tests {

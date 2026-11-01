@@ -18,9 +18,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cudarc::cublas::{sys::cublasOperation_t, CudaBlas, Gemm, GemmConfig, StridedBatchedConfig};
-use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg};
+use cudarc::driver::{sys, CudaContext, CudaFunction, CudaSlice, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg};
 use profile::timer;
-use weta_core::{Backend, BinaryOp, DType, Device, Error, HostData, Im2ColParams, Layout, ReduceOp, Result, UnaryOp, View};
+use weta_core::{Backend, BinaryOp, DType, Device, Distribution, Error, HostData, Im2ColParams, Layout, ReduceOp, Result, UnaryOp, View};
 
 /// Data on one GPU.
 pub enum CudaData {
@@ -53,7 +53,8 @@ impl CudaStorage {
 #[derive(Clone, Copy)]
 struct Strides {
     ndim: i32,
-    pad: i32,
+    /// 1 if contiguous: the kernels then index directly, skipping the divisions.
+    contig: i32,
     shape: [i64; 8],
     stride: [i64; 8],
     offset: i64,
@@ -64,7 +65,8 @@ unsafe impl DeviceRepr for Strides {}
 impl Strides {
     fn of(l: &Layout) -> Strides {
         assert!(l.ndim() <= 8, "the CUDA backend supports at most 8 dims, got shape {:?}", l.shape());
-        let mut s = Strides { ndim: l.ndim() as i32, pad: 0, shape: [1; 8], stride: [0; 8], offset: l.offset() as i64 };
+        let mut s =
+            Strides { ndim: l.ndim() as i32, contig: l.is_contiguous() as i32, shape: [1; 8], stride: [0; 8], offset: l.offset() as i64 };
         for i in 0..l.ndim() {
             s.shape[i] = l.shape()[i] as i64;
             s.stride[i] = l.strides()[i] as i64;
@@ -153,12 +155,30 @@ pub fn is_available() -> bool {
     device_count() > 0
 }
 
+/// Makes the driver's memory pool a cache. cudarc allocates with
+/// `cuMemAllocAsync` from the device's default pool, but by default that pool
+/// hands freed memory back to the OS at every synchronisation (every
+/// `loss.item()`), so each training step pays to allocate everything again.
+/// With no release threshold, freed blocks stay in the pool for reuse, which
+/// is what PyTorch's caching allocator does by hand.
+fn keep_freed_memory(ctx: &Arc<CudaContext>) {
+    unsafe {
+        let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
+        if sys::cuDeviceGetDefaultMemPool(&mut pool, ctx.cu_device()) == sys::CUresult::CUDA_SUCCESS {
+            let mut threshold = u64::MAX;
+            let attr = sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RELEASE_THRESHOLD;
+            sys::cuMemPoolSetAttribute(pool, attr, &mut threshold as *mut u64 as *mut std::ffi::c_void);
+        }
+    }
+}
+
 impl CudaBackend {
     fn new(ordinal: usize) -> Result<CudaBackend> {
         if ordinal >= device_count() {
             return Err(Error::DeviceUnavailable(format!("no CUDA device {ordinal} (found {})", device_count())));
         }
         let ctx = CudaContext::new(ordinal).map_err(cuda_err)?;
+        keep_freed_memory(&ctx);
         let stream = ctx.default_stream();
         let blas = CudaBlas::new(stream.clone()).map_err(cuda_err)?;
         let ptx = cudarc::nvrtc::compile_ptx(kernels::source()).map_err(cuda_err)?;
@@ -177,6 +197,22 @@ impl CudaBackend {
 
     fn wrap(&self, data: CudaData) -> CudaStorage {
         CudaStorage { data, ordinal: self.ordinal }
+    }
+
+    /// Output storage for a kernel that writes every element, so it skips
+    /// the memset that `alloc_zeros` would spend.
+    fn uninit<T: DeviceRepr>(&self, n: usize) -> CudaSlice<T> {
+        // Safety: every caller launches a kernel that writes all `n` elements
+        // before the slice is read. cudarc can't allocate zero bytes.
+        unsafe { self.stream.alloc::<T>(n.max(1)) }.expect("CUDA allocation failed")
+    }
+
+    fn uninit_of(&self, dtype: DType, n: usize) -> CudaData {
+        match dtype {
+            DType::F32 => CudaData::F32(self.uninit(n)),
+            DType::F64 => CudaData::F64(self.uninit(n)),
+            DType::I64 => CudaData::I64(self.uninit(n)),
+        }
     }
 
     fn zeros_of(&self, dtype: DType, n: usize) -> CudaData {
@@ -199,6 +235,11 @@ fn bucket(n: usize) -> String {
     }
     format!("≤{b}")
 }
+
+/// Threads per block for block reductions, and the axis length from which
+/// they beat one thread per output.
+const REDUCE_THREADS: u32 = 256;
+const BLOCK_REDUCE_MIN: i64 = 128;
 
 fn cfg(n: usize) -> LaunchConfig {
     LaunchConfig::for_num_elems(n as u32)
@@ -254,23 +295,24 @@ fn binary_code(op: BinaryOp) -> i32 {
     }
 }
 
-/// Runs `$body` with `$s` bound to the typed slice and `$out` to a fresh
-/// output slice of the same type with `$n` elements.
+/// Runs `$body` with `$s` bound to the typed slice and `$out` to a fresh,
+/// uninitialised output slice of the same type with `$n` elements, which
+/// `$body` must fill.
 macro_rules! typed {
     ($self:ident, $data:expr, $n:expr, |$s:ident, $out:ident| $body:expr) => {
         match $data {
             CudaData::F32($s) => {
-                let mut $out = $self.stream.alloc_zeros::<f32>($n.max(1)).expect("CUDA alloc");
+                let mut $out = $self.uninit::<f32>($n);
                 $body;
                 CudaData::F32($out)
             }
             CudaData::F64($s) => {
-                let mut $out = $self.stream.alloc_zeros::<f64>($n.max(1)).expect("CUDA alloc");
+                let mut $out = $self.uninit::<f64>($n);
                 $body;
                 CudaData::F64($out)
             }
             CudaData::I64($s) => {
-                let mut $out = $self.stream.alloc_zeros::<i64>($n.max(1)).expect("CUDA alloc");
+                let mut $out = $self.uninit::<i64>($n);
                 $body;
                 CudaData::I64($out)
             }
@@ -313,7 +355,8 @@ impl CudaBackend {
     {
         let (bs, m, k) = (la.shape()[0], la.shape()[1], la.shape()[2]);
         let n = lb.shape()[2];
-        let mut out = self.stream.alloc_zeros::<T>((bs * m * n).max(1)).expect("CUDA alloc");
+        // beta = 0, so cuBLAS writes C without reading it.
+        let mut out = self.uninit::<T>(bs * m * n);
         if bs * m * n == 0 {
             return out;
         }
@@ -458,7 +501,7 @@ impl Backend for CudaBackend {
         let f = self.func(&format!("binary_{}", sfx(a.dtype)));
         macro_rules! go {
             ($x:expr, $y:expr, $v:ident, $t:ty) => {{
-                let mut out = self.stream.alloc_zeros::<$t>(n.max(1)).expect("CUDA alloc");
+                let mut out = self.uninit::<$t>(n);
                 if n > 0 {
                     unsafe {
                         self.stream.launch_builder(f).arg(&mut out).arg($x).arg(&sa).arg($y).arg(&sb).arg(&n64).arg(&code).launch(cfg(n))
@@ -499,7 +542,7 @@ impl Backend for CudaBackend {
         let name = format!("{}reduce_{}", if arg { "arg" } else { "" }, sfx(x.dtype));
         let f = self.func(&name);
         if arg {
-            let mut out = self.stream.alloc_zeros::<i64>(n.max(1)).expect("CUDA alloc");
+            let mut out = self.uninit::<i64>(n);
             if n > 0 {
                 let mut b = self.stream.launch_builder(f);
                 b.arg(&mut out);
@@ -512,6 +555,21 @@ impl Backend for CudaBackend {
             }
             return self.wrap(CudaData::I64(out));
         }
+        // Long axes get a block of threads per output (see `reduce_block`
+        // in kernels.rs); short ones a thread per output.
+        if len >= BLOCK_REDUCE_MIN && n > 0 {
+            let f = self.func(&format!("reduce_block_{}", sfx(x.dtype)));
+            let launch = LaunchConfig {
+                grid_dim: (n as u32, 1, 1),
+                block_dim: (REDUCE_THREADS, 1, 1),
+                shared_mem_bytes: REDUCE_THREADS * x.dtype.size_in_bytes() as u32,
+            };
+            let d = typed!(self, &x.storage.data, n, |s, out| unsafe {
+                self.stream.launch_builder(f).arg(&mut out).arg(s).arg(&os).arg(&len).arg(&stride).arg(&code).launch(launch)
+            }
+            .expect("CUDA block reduce failed"));
+            return self.wrap(d);
+        }
         let d = typed!(self, &x.storage.data, n, |s, out| if n > 0 {
             unsafe {
                 self.stream.launch_builder(f).arg(&mut out).arg(s).arg(&os).arg(&len).arg(&stride).arg(&n64).arg(&code).launch(cfg(n))
@@ -519,6 +577,27 @@ impl Backend for CudaBackend {
             .expect("CUDA reduce kernel failed");
         });
         self.wrap(d)
+    }
+
+    fn random(&self, len: usize, dtype: DType, dist: Distribution, seed: u64) -> CudaStorage {
+        let _t = timer(&self.stream, || "random".into());
+        let (code, a, b) = match dist {
+            Distribution::Uniform { lo, hi } => (0i32, lo, hi),
+            Distribution::Normal { mean, std } => (1, mean, std),
+        };
+        let f = self.func(&format!("random_{}", sfx(dtype)));
+        let n64 = len as i64;
+        let mut out = self.uninit_of(dtype, len);
+        if len > 0 {
+            let mut bld = self.stream.launch_builder(f);
+            match &mut out {
+                CudaData::F32(o) => bld.arg(o),
+                CudaData::F64(o) => bld.arg(o),
+                CudaData::I64(_) => panic!("random: expected a float dtype, got i64"),
+            };
+            unsafe { bld.arg(&n64).arg(&seed).arg(&code).arg(&a).arg(&b).launch(cfg(len)) }.expect("CUDA random kernel failed");
+        }
+        self.wrap(out)
     }
 
     fn matmul(&self, a: View<'_, CudaStorage>, b: View<'_, CudaStorage>) -> CudaStorage {
@@ -581,7 +660,7 @@ impl Backend for CudaBackend {
         let n = x.layout.numel();
         let (xs, n64) = (Strides::of(x.layout), n as i64);
         let f = self.func(&format!("cast_{}_{}", sfx(x.dtype), sfx(dtype)));
-        let mut out = self.zeros_of(dtype, n);
+        let mut out = self.uninit_of(dtype, n);
         if n > 0 {
             let mut b = self.stream.launch_builder(f);
             match &mut out {

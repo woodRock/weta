@@ -8,11 +8,14 @@ pub const FLOATS: [(&str, &str); 2] = [("f32", "float"), ("f64", "double")];
 pub const ALL: [(&str, &str); 3] = [("f32", "float"), ("f64", "double"), ("i64", "long long")];
 
 const PRELUDE: &str = r#"
-struct Strides { int ndim; int pad; long long shape[8]; long long stride[8]; long long offset; };
+struct Strides { int ndim; int contig; long long shape[8]; long long stride[8]; long long offset; };
 struct ConvP { long long n, c, h, w, kh, kw, sh, sw, ph, pw, dh, dw, oh, ow; };
 
-// Storage index of row-major element i of a strided view.
+// Storage index of row-major element i of a strided view. Contiguous views
+// skip the per-dimension division, which costs far more than the memory
+// access it computes the address of.
 __device__ __forceinline__ long long at(const Strides& s, long long i) {
+    if (s.contig) return s.offset + i;
     long long off = s.offset;
     for (int d = s.ndim - 1; d >= 0; --d) {
         long long n = s.shape[d];
@@ -20,6 +23,17 @@ __device__ __forceinline__ long long at(const Strides& s, long long i) {
         i /= n;
     }
     return off;
+}
+
+// The same counter-based generator as weta_core::splitmix64.
+__device__ __forceinline__ unsigned long long splitmix64(unsigned long long seed, unsigned long long i) {
+    unsigned long long z = seed + (i + 1ULL) * 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+__device__ __forceinline__ double unit(unsigned long long seed, unsigned long long i) {
+    return (double)(splitmix64(seed, i) >> 11) * (1.0 / 9007199254740992.0);
 }
 
 #define TID long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x; if (i >= n) return;
@@ -115,6 +129,18 @@ extern "C" __global__ void unary_{n}({t}* out, const {t}* x, Strides xs, long lo
 extern "C" __global__ void binary_{n}({t}* out, const {t}* a, Strides as, const {t}* b, Strides bs, long long n, int op) {{
     TID out[i] = binary_op<{t}>(op, a[at(as, i)], b[at(bs, i)]);
 }}
+// dist 0: uniform in [a, b); dist 1: normal with mean a, std b (Box-Muller).
+extern "C" __global__ void random_{n}({t}* out, long long n, unsigned long long seed, int dist, double a, double b) {{
+    TID
+    double v;
+    if (dist == 0) {{
+        v = a + (b - a) * unit(seed, i);
+    }} else {{
+        double u1 = 1.0 - unit(seed, 2 * i), u2 = unit(seed, 2 * i + 1);
+        v = a + b * sqrt(-2.0 * log(u1)) * cos(6.283185307179586 * u2);
+    }}
+    out[i] = ({t})v;
+}}
 extern "C" __global__ void col2im_{n}({t}* out, const {t}* cols, ConvP p, long long n) {{
     TID
     long long x = i % p.w, t = i / p.w;
@@ -160,6 +186,37 @@ extern "C" __global__ void reduce_{n}({t}* out, const {t}* x, Strides outer, lon
     if (len == 0) acc = 0;
     out[i] = acc;
 }}
+// The same reduction with one block per output: each thread folds a strided
+// share of the axis, then the block combines the partial results in shared
+// memory, halving the number of active threads each step (a tree reduction).
+// Used for long axes, where one thread per output would leave most of the
+// GPU idle.
+extern "C" __global__ void reduce_block_{n}({t}* out, const {t}* x, Strides outer, long long len, long long stride, int op) {{
+    extern __shared__ unsigned char smem[];
+    {t}* part = ({t}*)smem;
+    long long base = at(outer, blockIdx.x);
+    // Sums start from 0. Max and min start from element 0, which every
+    // thread may include, since repeating it doesn't change the result.
+    {t} acc = op == 0 ? ({t})0 : x[base];
+    for (long long k = threadIdx.x; k < len; k += blockDim.x) {{
+        {t} v = x[base + k * stride];
+        if (op == 0) acc += v;
+        else if (op == 1) acc = (v > acc || v != v) ? v : acc;
+        else acc = (v < acc || v != v) ? v : acc;
+    }}
+    part[threadIdx.x] = acc;
+    __syncthreads();
+    for (unsigned int w = blockDim.x / 2; w > 0; w /= 2) {{
+        if (threadIdx.x < w) {{
+            {t} v = part[threadIdx.x + w];
+            if (op == 0) part[threadIdx.x] += v;
+            else if (op == 1) part[threadIdx.x] = (v > part[threadIdx.x] || v != v) ? v : part[threadIdx.x];
+            else part[threadIdx.x] = (v < part[threadIdx.x] || v != v) ? v : part[threadIdx.x];
+        }}
+        __syncthreads();
+    }}
+    if (threadIdx.x == 0) out[blockIdx.x] = part[0];
+}}
 // op: 0 argmax, 1 argmin (first occurrence).
 extern "C" __global__ void argreduce_{n}(long long* out, const {t}* x, Strides outer, long long len, long long stride, long long n, int op) {{
     TID
@@ -201,9 +258,10 @@ pub fn names() -> Vec<String> {
     let mut v = Vec::new();
     for (n, _) in FLOATS {
         v.push(format!("col2im_{n}"));
+        v.push(format!("random_{n}"));
     }
     for (n, _) in ALL {
-        for k in ["unary", "binary", "reduce", "argreduce", "copy", "im2col"] {
+        for k in ["unary", "binary", "reduce", "reduce_block", "argreduce", "copy", "im2col"] {
             v.push(format!("{k}_{n}"));
         }
         for (m, _) in ALL {

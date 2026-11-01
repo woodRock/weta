@@ -60,9 +60,9 @@ MNIST test accuracy, from the examples as committed (seed 42):
 
 | Model | Example | Accuracy | Epoch time, laptop CPU (M-series) | Epoch time, RTX A5000 |
 | --- | --- | --- | --- | --- |
-| MLP 784-512-256-10, dropout | `mnist_mlp`, 10 epochs | **98.64%** (98.68% on GPU) | 4 s | 0.8 s |
-| CNN, 2 conv + BatchNorm, 422k params | `mnist_cnn`, 5 epochs | **99.29%** (99.30% on GPU) | ~85 s | 5.2 s |
-| MLP smoke test, 5,000 images | `cargo test` | 92.8% | 3 s for the whole test | |
+| MLP 784-512-256-10, dropout | `mnist_mlp`, 10 epochs | **98.61%** (98.69% on GPU) | 3.8 s | 0.8 s |
+| CNN, 2 conv + BatchNorm, 422k params | `mnist_cnn`, 5 epochs | **99.27%** (99.20% on GPU) | ~80 s | 3.4 s |
+| MLP smoke test, 5,000 images | `cargo test` | 92.5% | 3 s for the whole test | |
 
 PyTorch gets 91.3–91.4% on the smoke-test setup (same model, data and
 optimiser), so the numbers line up.
@@ -79,6 +79,51 @@ Speed against PyTorch 2.7 on the same laptop CPU (`cargo bench -p weta`,
 
 PyTorch on macOS uses Apple's Accelerate (AMX units) for matmul; weta uses
 the portable `gemm` crate.
+
+On the GPU, the same CNN on one idle RTX A5000 (`scripts/torch_mnist_cnn.py`
+runs it in PyTorch with the same model, batch size, optimiser and data
+pipeline):
+
+| | Epoch time |
+| --- | --- |
+| weta, first CUDA backend | 5.8 s |
+| weta, after the profiling pass below | 3.4 s |
+| PyTorch 2.14 | 1.15 s |
+
+### Profiling the GPU backend
+
+Set `WETA_CUDA_PROFILE=1` and the CUDA backend waits for every call to
+finish and totals the time per kernel. `mnist_cnn` prints the table at the end:
+
+```bash
+WETA_CUDA_PROFILE=1 cargo run --release --features cuda --example mnist_cnn -- --device cuda --epochs 1
+```
+
+Waiting after every call makes the run slower, but it shows where a step
+goes. The first profile showed element-wise kernels taking most of the time,
+not reductions as expected. That led to four changes inside
+`weta-cuda`, none of which touch the rest of weta:
+
+- **Contiguous fast path.** Kernels find each element of a strided view with
+  a division per dimension, which on a GPU costs more than the memory access
+  it addresses. Contiguous inputs now skip it.
+- **No zero-fill.** Kernels that write every output element get uninitialised
+  memory instead of paying for a memset first.
+- **Block reductions.** Reductions over long axes, such as BatchNorm's mean
+  over the batch, use a block of threads per output with a shared-memory tree
+  reduction, instead of one thread looping over the axis.
+- **Random numbers on the device.** Dropout masks and random tensors are
+  filled by a kernel instead of being made on the host and copied over. The
+  generator is counter-based (element `i` is a function of the seed and `i`),
+  so the CPU and GPU produce the same numbers for the same seed.
+
+A fifth change, keeping freed memory in the driver's pool, made no
+measurable difference to normal runs (it only helps the profiler, which
+synchronises constantly). It's kept because it's a few lines. What's left is
+mostly the cost of many small kernels: a training step makes about 400
+backend calls, each a separate kernel.
+Closing the rest of the gap to PyTorch would need fused kernels, which would
+duplicate maths that is written once today, so weta doesn't have them.
 
 ```bash
 cargo run --release --example mnist_mlp -- --data data --epochs 10
@@ -122,7 +167,7 @@ weta-core ─┬─ weta-cpu ──┐
 | --- | --- | --- |
 | `weta-core` | ~870 | `DType`, `Device`, `Layout` (shape, strides, offset), op enums, the `Backend` trait |
 | `weta-cpu` | ~610 | The reference backend: strided kernels, rayon, `gemm` |
-| `weta-cuda` | ~790 | NVRTC kernels and cuBLAS through `cudarc` (feature `cuda`) |
+| `weta-cuda` | ~1000 | NVRTC kernels and cuBLAS through `cudarc` (feature `cuda`), plus a small profiler |
 | `weta-tensor` | ~1330 | Strided N-d tensors with no autograd (the NumPy layer) |
 | `weta-autograd` | ~1930 | The autograd `Tensor`, graph, `backward`, `gradcheck`, `tensor!`, indexing |
 | `weta-nn` | ~1320 | `Module`, layers, `functional`, `init`, losses |
@@ -201,7 +246,7 @@ cargo run --release --no-default-features --features infer --example infer_mnist
 - The inference example binary is about 500 KB with `--profile release-small`
   (size-optimised) or 970 KB with `--release` (about 2.7× faster), before
   weights. The exported MNIST CNN above is 1.7 MB of weights and scores the
-  same 99.29% through `weta-infer` as in training. Add `--features rayon` for
+  same accuracy through `weta-infer` as in training. Add `--features rayon` for
   multi-threaded inference.
 - `weta-infer` builds for `wasm32-unknown-unknown`; CI also checks
   `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`.

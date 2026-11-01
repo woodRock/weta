@@ -284,7 +284,8 @@ impl Op for SumBw {
     // broadcast back over the reduced dims.
     fn backward(&self, ctx: &BackwardCtx, g: &Tensor) -> Vec<Option<Tensor>> {
         let shape = ctx.input_shape(0);
-        vec![Some(unsqueeze_dims(g, shape, &self.dims, self.keepdim).broadcast_to(shape).contiguous())]
+        // A stride-0 view: no copy, since every op reads broadcast views.
+        vec![Some(unsqueeze_dims(g, shape, &self.dims, self.keepdim).broadcast_to(shape))]
     }
 }
 

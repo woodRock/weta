@@ -148,3 +148,42 @@ impl Im2ColParams {
         )
     }
 }
+
+/// What [`Backend::random`](crate::Backend::random) draws from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Distribution {
+    Uniform { lo: f64, hi: f64 },
+    Normal { mean: f64, std: f64 },
+}
+
+/// A counter-based random number generator: element `i` of a random tensor
+/// is a pure function of `(seed, i)`, so any backend can fill elements in
+/// parallel, in any order, and get the same numbers as every other backend.
+/// The mixing function is SplitMix64's finaliser (Steele et al., 2014);
+/// `kernels.rs` in `weta-cuda` has the same code in CUDA C.
+pub fn splitmix64(seed: u64, i: u64) -> u64 {
+    let mut z = seed.wrapping_add(i.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Uniform in `[0, 1)` with 53 random bits.
+fn unit(seed: u64, i: u64) -> f64 {
+    (splitmix64(seed, i) >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+}
+
+impl Distribution {
+    /// Element `i` of a random tensor drawn with `seed`. Normals use the
+    /// Box–Muller transform on the uniforms at counters `2i` and `2i + 1`.
+    pub fn sample(self, seed: u64, i: u64) -> f64 {
+        match self {
+            Distribution::Uniform { lo, hi } => lo + (hi - lo) * unit(seed, i),
+            Distribution::Normal { mean, std } => {
+                let u1 = 1.0 - unit(seed, 2 * i); // (0, 1], so ln is finite
+                let u2 = unit(seed, 2 * i + 1);
+                mean + std * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+            }
+        }
+    }
+}

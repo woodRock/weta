@@ -1,4 +1,4 @@
-use crate::{BinaryOp, DType, Device, Im2ColParams, Layout, ReduceOp, UnaryOp};
+use crate::{BinaryOp, DType, Device, Distribution, Im2ColParams, Layout, ReduceOp, UnaryOp};
 
 /// A read-only look at a backend's storage through a layout.
 pub struct View<'a, S> {
@@ -90,4 +90,17 @@ pub trait Backend: Send + Sync + 'static {
     /// `[N, C·kh·kw, OH·OW]` → `[N, C, H, W]`, summing overlaps.
     fn col2im(&self, cols: View<'_, Self::Storage>, p: Im2ColParams, chw: (usize, usize, usize)) -> Self::Storage;
     fn cast(&self, x: View<'_, Self::Storage>, dtype: DType) -> Self::Storage;
+
+    /// `len` random floats, element `i` being `dist.sample(seed, i)`. The
+    /// default draws them on the host and copies them over; a GPU backend
+    /// overrides it to skip the copy.
+    fn random(&self, len: usize, dtype: DType, dist: Distribution, seed: u64) -> Self::Storage {
+        let v: Vec<f64> = (0..len as u64).map(|i| dist.sample(seed, i)).collect();
+        let data = match dtype {
+            DType::F32 => HostData::F32(v.into_iter().map(|x| x as f32).collect()),
+            DType::F64 => HostData::F64(v),
+            DType::I64 => panic!("random: expected a float dtype, got i64"),
+        };
+        self.from_host(data)
+    }
 }

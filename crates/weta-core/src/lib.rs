@@ -23,7 +23,7 @@ pub use backend::{Backend, HostData, View};
 pub use dtype::{DType, Element, Float};
 pub use error::{Error, Result};
 pub use layout::{broadcast_shapes, resolve_shape, Layout, StridedOffsets};
-pub use ops::{BinaryOp, Im2ColParams, ReduceOp, UnaryOp};
+pub use ops::{splitmix64, BinaryOp, Distribution, Im2ColParams, ReduceOp, UnaryOp};
 
 use std::fmt;
 
