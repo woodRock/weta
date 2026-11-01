@@ -61,7 +61,7 @@ pub fn report() -> Option<String> {
     }
     let t = TOTALS.lock().unwrap_or_else(|e| e.into_inner());
     let mut rows: Vec<(&String, &(u64, Duration))> = t.as_ref()?.iter().collect();
-    rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1 .1));
     let total: Duration = rows.iter().map(|r| r.1 .1).sum();
     let mut s = format!("{:<44} {:>9} {:>10} {:>6}\n", "CUDA backend call", "calls", "ms", "%");
     for (label, (n, d)) in rows {
