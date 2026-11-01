@@ -10,12 +10,16 @@
 //! backend-parity tests check each kernel against the CPU reference.
 
 mod kernels;
+mod profile;
+
+pub use profile::report as profile_report;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cudarc::cublas::{sys::cublasOperation_t, CudaBlas, Gemm, GemmConfig, StridedBatchedConfig};
 use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg};
+use profile::timer;
 use weta_core::{Backend, BinaryOp, DType, Device, Error, HostData, Im2ColParams, Layout, ReduceOp, Result, UnaryOp, View};
 
 /// Data on one GPU.
@@ -185,6 +189,15 @@ impl CudaBackend {
         };
         r.expect("CUDA allocation failed")
     }
+}
+
+/// "≤ 64", "≤ 4096", ...: coarse sizes for profile labels.
+fn bucket(n: usize) -> String {
+    let mut b = 1;
+    while b < n {
+        b *= 8;
+    }
+    format!("≤{b}")
 }
 
 fn cfg(n: usize) -> LaunchConfig {
@@ -365,6 +378,7 @@ impl Backend for CudaBackend {
     }
 
     fn from_host(&self, data: HostData) -> CudaStorage {
+        let _t = timer(&self.stream, || "from_host (upload)".into());
         let r = match data {
             HostData::F32(v) if v.is_empty() => Ok(self.zeros_of(DType::F32, 0)),
             HostData::F64(v) if v.is_empty() => Ok(self.zeros_of(DType::F64, 0)),
@@ -377,6 +391,7 @@ impl Backend for CudaBackend {
     }
 
     fn to_host(&self, x: View<'_, CudaStorage>) -> HostData {
+        let _t = timer(&self.stream, || "to_host (download)".into());
         let n = x.layout.numel();
         let c = self.contiguous(x);
         let r = match &c.data {
@@ -397,11 +412,13 @@ impl Backend for CudaBackend {
     }
 
     fn zeros(&self, len: usize, dtype: DType) -> CudaStorage {
+        let _t = timer(&self.stream, || "zeros".into());
         let d = self.zeros_of(dtype, len);
         self.wrap(d)
     }
 
     fn copy_strided(&self, src: View<'_, CudaStorage>, dst: &mut CudaStorage, dst_layout: &Layout) {
+        let _t = timer(&self.stream, || "copy_strided".into());
         let n = src.layout.numel();
         if n == 0 {
             return;
@@ -420,6 +437,7 @@ impl Backend for CudaBackend {
     }
 
     fn unary(&self, op: UnaryOp, x: View<'_, CudaStorage>) -> CudaStorage {
+        let _t = timer(&self.stream, || format!("unary {}", op.name()));
         let n = x.layout.numel();
         let (code, p1, p2) = unary_code(op);
         let xs = Strides::of(x.layout);
@@ -433,6 +451,7 @@ impl Backend for CudaBackend {
     }
 
     fn binary(&self, op: BinaryOp, a: View<'_, CudaStorage>, b: View<'_, CudaStorage>) -> CudaStorage {
+        let _t = timer(&self.stream, || format!("binary {}", op.name()));
         let n = a.layout.numel();
         let (sa, sb) = (Strides::of(a.layout), Strides::of(b.layout));
         let (code, n64) = (binary_code(op), n as i64);
@@ -459,6 +478,11 @@ impl Backend for CudaBackend {
     }
 
     fn reduce(&self, op: ReduceOp, x: View<'_, CudaStorage>, axis: usize) -> CudaStorage {
+        let _t = timer(&self.stream, || {
+            let len = x.layout.shape()[axis];
+            let outs = x.layout.numel() / len.max(1);
+            format!("reduce {op:?} ({} outputs, len {})", bucket(outs), bucket(len))
+        });
         let mut shape = x.layout.shape().to_vec();
         let mut strides = x.layout.strides().to_vec();
         let (len, stride) = (shape.remove(axis) as i64, strides.remove(axis) as i64);
@@ -498,6 +522,7 @@ impl Backend for CudaBackend {
     }
 
     fn matmul(&self, a: View<'_, CudaStorage>, b: View<'_, CudaStorage>) -> CudaStorage {
+        let _t = timer(&self.stream, || "matmul".into());
         // Operands cuBLAS can't read in place are copied to contiguous first.
         let fix = |v: View<'_, CudaStorage>| -> Option<(CudaStorage, Layout)> {
             if Self::gemm_operand(v.layout).is_some() {
@@ -524,6 +549,7 @@ impl Backend for CudaBackend {
     }
 
     fn im2col(&self, x: View<'_, CudaStorage>, p: Im2ColParams) -> CudaStorage {
+        let _t = timer(&self.stream, || "im2col".into());
         let s = x.layout.shape();
         let cp = ConvP::new(p, (s[0], s[1], s[2], s[3]));
         let n = (cp.n * cp.c * cp.kh * cp.kw * cp.oh * cp.ow) as usize;
@@ -537,6 +563,7 @@ impl Backend for CudaBackend {
     }
 
     fn col2im(&self, cols: View<'_, CudaStorage>, p: Im2ColParams, (c, h, w): (usize, usize, usize)) -> CudaStorage {
+        let _t = timer(&self.stream, || "col2im".into());
         let nb = cols.layout.shape()[0];
         let cp = ConvP::new(p, (nb, c, h, w));
         let n = nb * c * h * w;
@@ -550,6 +577,7 @@ impl Backend for CudaBackend {
     }
 
     fn cast(&self, x: View<'_, CudaStorage>, dtype: DType) -> CudaStorage {
+        let _t = timer(&self.stream, || format!("cast {} -> {dtype}", x.dtype));
         let n = x.layout.numel();
         let (xs, n64) = (Strides::of(x.layout), n as i64);
         let f = self.func(&format!("cast_{}_{}", sfx(x.dtype), sfx(dtype)));

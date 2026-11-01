@@ -63,7 +63,7 @@
 //! | `weta-io`, `weta-infer` | safetensors, and inference without autograd |
 
 pub use weta_core::{DType, Device, Error, Result};
-pub use weta_tensor::{cuda_device_count, cuda_is_available, manual_seed};
+pub use weta_tensor::{cuda_device_count, cuda_is_available, cuda_profile_report, manual_seed};
 
 #[cfg(feature = "train")]
 pub use weta_autograd::{

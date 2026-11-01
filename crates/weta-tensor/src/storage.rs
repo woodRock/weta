@@ -49,6 +49,19 @@ pub fn cuda_is_available() -> bool {
     }
 }
 
+/// The CUDA backend's per-kernel timings when run with
+/// `WETA_CUDA_PROFILE=1`, or `None`.
+pub fn cuda_profile_report() -> Option<String> {
+    #[cfg(feature = "cuda")]
+    {
+        weta_cuda::profile_report()
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        None
+    }
+}
+
 pub fn cuda_device_count() -> usize {
     #[cfg(feature = "cuda")]
     {

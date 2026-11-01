@@ -58,14 +58,18 @@ fn main() -> weta::Result<()> {
         let start = Instant::now();
         model.train();
         let (mut sum, mut batches) = (0.0, 0);
+        let mut data_time = 0.0;
+        let mut t = Instant::now();
         for (x, y) in &train {
             let (x, y) = (x.to(device), y.to(device));
+            data_time += t.elapsed().as_secs_f64();
             let loss = F::cross_entropy(&model.forward(&x), &y);
             opt.zero_grad();
             loss.backward();
             opt.step();
             sum += loss.item();
             batches += 1;
+            t = Instant::now();
         }
         sched.step(&mut opt);
         model.eval();
@@ -80,11 +84,14 @@ fn main() -> weta::Result<()> {
             correct as f64 / total as f64
         };
         println!(
-            "epoch {epoch}: mean loss {:.4}, test accuracy {:.2}% ({:.1}s)",
+            "epoch {epoch}: mean loss {:.4}, test accuracy {:.2}% ({:.1}s, {data_time:.1}s loading batches)",
             sum / batches as f64,
             acc * 100.0,
             start.elapsed().as_secs_f64()
         );
+    }
+    if let Some(r) = weta::cuda_profile_report() {
+        println!("{r}");
     }
     let model = model.to(Device::Cpu);
     nn::utils::export(&model, "mnist_cnn.safetensors")?;
