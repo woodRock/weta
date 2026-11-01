@@ -56,11 +56,29 @@ fn main() -> weta::Result<()> {
 
 ## Results
 
-| Model | Example | Test accuracy | Time per epoch |
+MNIST test accuracy, from the examples as committed (seed 42):
+
+| Model | Example | Accuracy | Epoch time, laptop CPU (M-series) | Epoch time, RTX A5000 |
+| --- | --- | --- | --- | --- |
+| MLP 784-512-256-10, dropout | `mnist_mlp`, 10 epochs | **98.64%** (98.68% on GPU) | 4 s | 0.8 s |
+| CNN, 2 conv + BatchNorm, 422k params | `mnist_cnn`, 5 epochs | **99.29%** (99.30% on GPU) | ~85 s | 5.2 s |
+| MLP smoke test, 5,000 images | `cargo test` | 92.8% | 3 s for the whole test | |
+
+PyTorch gets 91.3–91.4% on the smoke-test setup (same model, data and
+optimiser), so the numbers line up.
+
+Speed against PyTorch 2.7 on the same laptop CPU (`cargo bench -p weta`,
+`python3 scripts/bench_torch.py`). The goal is to track the gap, not to win:
+
+| Benchmark | weta | PyTorch | Gap |
 | --- | --- | --- | --- |
-| MLP 784-512-256-10 | `mnist_mlp`, 10 epochs | **98.64%** | 4 s (M-series laptop CPU) |
-| CNN (2 conv + BN, 422k params) | `mnist_cnn`, 5 epochs | **99.29%** | ~85 s (laptop CPU) |
-| MLP smoke test, 5,000 images | `cargo test` | 92.8% | 3 s for the whole test |
+| matmul 128×128 | 74 µs | 5 µs | 15× |
+| matmul 512×512 | 0.82 ms | 0.20 ms | 4× |
+| conv2d [64,32,14,14] * [64,32,3,3] | 2.25 ms | 1.65 ms | 1.4× |
+| MLP 784-512-10 train step, batch 128 | 4.4 ms | 1.0 ms | 4.5× |
+
+PyTorch on macOS uses Apple's Accelerate (AMX units) for matmul; weta uses
+the portable `gemm` crate.
 
 ```bash
 cargo run --release --example mnist_mlp -- --data data --epochs 10
