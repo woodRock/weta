@@ -1,0 +1,54 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/woodRock/weta"
+rust-version = "1.87"
+
+[workspace.dependencies]
+weta-core = { path = "crates/weta-core" }
+weta-cpu = { path = "crates/weta-cpu" }
+weta-cuda = { path = "crates/weta-cuda" }
+weta-tensor = { path = "crates/weta-tensor", default-features = false }
+weta-autograd = { path = "crates/weta-autograd" }
+weta-derive = { path = "crates/weta-derive" }
+weta-nn = { path = "crates/weta-nn" }
+weta-optim = { path = "crates/weta-optim" }
+weta-data = { path = "crates/weta-data", default-features = false }
+weta-io = { path = "crates/weta-io" }
+weta-infer = { path = "crates/weta-infer" }
+weta = { path = "crates/weta" }
+
+rayon = "1.10"
+gemm = { version = "0.17", default-features = false, features = ["std", "rayon"] }
+smallvec = "1.13"
+libm = "0.2"
+serde_json = "1"
+ureq = "2"
+flate2 = "1"
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+proptest = "1"
+cudarc = { version = "0.19", default-features = false, features = ["std", "cublas", "driver", "nvrtc", "dynamic-loading", "cuda-12020"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true

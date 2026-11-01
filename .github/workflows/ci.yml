@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache MNIST
+        uses: actions/cache@v4
+        with:
+          path: target/mnist-data
+          key: mnist-v1
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  cuda-check:
+    # cudarc loads the CUDA libraries at runtime, so this type-checks the
+    # CUDA backend without a GPU or toolkit. It only *runs* on a GPU machine.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p weta --features cuda --all-targets -- -D warnings
+
+  deploy-targets:
+    # The inference path builds for the browser, ARM boards and Windows.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p weta-infer --release --target wasm32-unknown-unknown
+      - run: cargo check -p weta --no-default-features --features infer --example infer_mnist --target aarch64-unknown-linux-gnu
+      - run: cargo check -p weta --no-default-features --features infer --example infer_mnist --target x86_64-pc-windows-msvc
+      - name: Inference binary size
+        run: |
+          cargo build -p weta --profile release-small --no-default-features --features infer --example infer_mnist
+          ls -l target/release-small/examples/infer_mnist

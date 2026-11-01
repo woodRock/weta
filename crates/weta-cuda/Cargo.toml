@@ -1,0 +1,11 @@
+[package]
+name = "weta-cuda"
+description = "CUDA backend for weta: NVRTC element-wise kernels and cuBLAS matmul, through cudarc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+weta-core.workspace = true
+cudarc.workspace = true

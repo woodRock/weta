@@ -1,0 +1,21 @@
+[package]
+name = "weta-tensor"
+description = "N-dimensional strided tensors for weta (no autograd): the numpy layer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["rayon"]
+rayon = ["weta-cpu/rayon"]
+cuda = ["dep:weta-cuda"]
+
+[dependencies]
+weta-core.workspace = true
+weta-cpu = { path = "../weta-cpu", default-features = false }
+weta-cuda = { workspace = true, optional = true }
+libm.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

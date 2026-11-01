@@ -1,0 +1,10 @@
+[package]
+name = "weta-core"
+description = "Shapes, layouts, dtypes, devices and the Backend trait shared by every weta crate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+libm.workspace = true

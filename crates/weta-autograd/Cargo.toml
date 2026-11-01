@@ -1,0 +1,12 @@
+[package]
+name = "weta-autograd"
+description = "Reverse-mode automatic differentiation for weta tensors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+weta-core.workspace = true
+weta-tensor.workspace = true
+smallvec.workspace = true

@@ -1,0 +1,52 @@
+[package]
+name = "weta"
+description = "A small, readable deep learning framework with a PyTorch-style API"
+readme = "../../README.md"
+keywords = ["deep-learning", "autograd", "tensor", "neural-network"]
+categories = ["science", "algorithms"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["train", "rayon", "download"]
+train = ["dep:weta-autograd", "dep:weta-nn", "dep:weta-optim", "dep:weta-data"]
+infer = []
+rayon = ["weta-tensor/rayon"]
+cuda = ["weta-tensor/cuda"]
+download = ["weta-data?/download"]
+
+[dependencies]
+weta-core.workspace = true
+weta-tensor.workspace = true
+weta-io.workspace = true
+weta-infer.workspace = true
+weta-autograd = { workspace = true, optional = true }
+weta-nn = { workspace = true, optional = true }
+weta-optim = { workspace = true, optional = true }
+weta-data = { workspace = true, optional = true, default-features = false }
+
+[dev-dependencies]
+proptest.workspace = true
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "ops"
+harness = false
+required-features = ["train"]
+
+[[example]]
+name = "mnist_mlp"
+required-features = ["train"]
+
+[[example]]
+name = "mnist_cnn"
+required-features = ["train"]
+
+[[example]]
+name = "custom_op"
+required-features = ["train"]
+
+[[example]]
+name = "infer_mnist"

@@ -1,0 +1,13 @@
+[package]
+name = "weta-optim"
+description = "Optimisers for weta: SGD, Adam, AdamW"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+weta-core.workspace = true
+weta-tensor.workspace = true
+weta-autograd.workspace = true
+weta-io.workspace = true

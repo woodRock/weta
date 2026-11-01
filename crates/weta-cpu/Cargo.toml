@@ -1,0 +1,17 @@
+[package]
+name = "weta-cpu"
+description = "The reference CPU backend for weta: strided kernels in plain Rust, rayon threads, gemm matmul"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["rayon"]
+rayon = ["dep:rayon", "gemm/rayon"]
+
+[dependencies]
+weta-core.workspace = true
+gemm = { version = "0.17", default-features = false, features = ["std"] }
+rayon = { workspace = true, optional = true }
+libm.workspace = true
