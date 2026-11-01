@@ -34,7 +34,7 @@ syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 proptest = "1"
-cudarc = { version = "0.19", default-features = false, features = ["std", "cublas", "driver", "nvrtc", "dynamic-loading", "cuda-12020"] }
+cudarc = { version = "=0.19.0", default-features = false, features = ["std", "cublas", "driver", "nvrtc", "dynamic-loading", "cuda-12020"] }
 
 [profile.dev]
 opt-level = 1
